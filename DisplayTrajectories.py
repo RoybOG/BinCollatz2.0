@@ -1,0 +1,302 @@
+from itertools import pairwise
+import tkinter as tk
+from tkinter import ttk
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.collections import LineCollection
+import matplotlib.pyplot as plt
+from Utils import stripTrailingZeros, countTrailingZeros
+#from collatzAnalysisBin import collatzBinDerivative2
+
+class FullGraphToolbar(NavigationToolbar2Tk):
+  def __init__(self, canvas, window, full_xlim):
+    self.full_xlim = full_xlim
+    super().__init__(canvas, window)
+
+  def save_figure(self, *args):
+    ax = self.canvas.figure.axes[0]
+    visible_xlim = ax.get_xlim()
+    try:
+      ax.set_xlim(self.full_xlim)
+      super().save_figure(*args)
+    finally:
+      ax.set_xlim(visible_xlim)
+      self.canvas.draw_idle()
+
+
+
+
+def collatz_gen(n):
+  """Yields the Collatz sequence starting from n until reaching 1."""
+  yield n
+  while n != 1:
+    if(n%2==1):
+        n = 3 * n + 1
+    n = stripTrailingZeros(n)
+    
+    yield n
+
+
+def get_starting_number():
+   raw = input('Enter a starting positive integer (default 27): ').strip()
+   if not raw:
+    return 27
+   else:
+     return int(raw,0)
+    #print('Please enter a valid integer greater than 0.')
+
+
+def build_trajectory(start_n, colorsFunc=None):
+  """Builds points, segment tuples, colors, and widths in a single pass."""
+  points = tuple(enumerate(collatz_gen(start_n)))
+  peak_val = max(y for _, y in points)
+
+  segments, colors, widths = [], [], []
+
+  def getColor(p1,p2):
+    if colorsFunc:
+      c = colorsFunc(p1,p2)
+      if c is not None:
+        return c
+    
+    return 'grey'
+  
+  for (x1, y1), (x2, y2) in pairwise(points):
+    segments.append(((x1, y1), (x2, y2)))
+
+    colors.append(getColor((x1, y1), (x2, y2)))
+    widths.append(3.0)
+
+  return points, tuple(segments), colors, widths
+
+
+def attach_hover_tooltip(fig, ax, scatter, points, textFunc=None):
+  """Configures interactive mouse-hover tooltips for scatter points."""
+  annot = ax.annotate(
+      '',
+      xy=(0, 0),
+      xytext=(12, -24),
+      textcoords='offset points',
+      fontsize=9,
+      fontweight='bold',
+      color='#0f172a',
+      bbox=dict(
+          boxstyle='round,pad=0.35',
+          fc='#fef08a',
+          ec='#ca8a04',
+          lw=1.2,
+          alpha=0.95,
+      ),
+      arrowprops=dict(arrowstyle='->', color='#ca8a04', lw=1.2),
+      zorder=10,
+  )
+  annot.set_visible(False)
+
+  def on_hover(event):
+    if event.inaxes == ax:
+      contains, ind = scatter.contains(event)
+      if contains:
+        idx = ind['ind'][0]
+        x_val, y_val = points[idx]
+        annot.xy = (x_val, y_val)
+
+        pointText = f'Value: {y_val:,}'
+        if textFunc is not None:
+            pointText = pointText + '\n' + '\n'.join((f'{k}: {v}' for k,v in textFunc(x_val, y_val).items()))
+
+        annot.set_text(pointText)
+        annot.set_visible(True)
+        fig.canvas.draw_idle()
+        return
+
+    if annot.get_visible():
+      annot.set_visible(False)
+      fig.canvas.draw_idle()
+
+  fig.canvas.mpl_connect('motion_notify_event', on_hover)
+
+
+def show_interactive_window(fig, ax, total_steps, binary_values, title='Collatz Trajectory'):
+  """Displays a fixed-size chart with synced horizontal scrollbar and mouse-wheel zoom."""
+  root = tk.Tk()
+  root.title(title)
+  root.geometry('1150x620')
+
+  # Full data bounds on the X-axis
+  min_x = -0.8
+  max_x = total_steps + 0.8
+  total_span = max_x - min_x
+
+  # Embed the Matplotlib figure directly (fills the window cleanly)
+  mpl_canvas = FigureCanvasTkAgg(fig, master=root)
+  mpl_canvas.get_default_filename = lambda: title
+  mpl_canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+  binary_frame = ttk.Frame(root)
+  binary_frame.pack(side=tk.BOTTOM, fill=tk.X)
+
+  ttk.Label(binary_frame, text='Binary trajectory').pack(side=tk.TOP, fill=tk.X)
+
+  binary_scroll = ttk.Scrollbar(binary_frame, orient=tk.VERTICAL)
+  binary_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+  binary_text = tk.Text(
+      binary_frame,
+      height=5,
+      font=('Consolas', 10),
+      yscrollcommand=binary_scroll.set,
+      padx=8,
+      relief=tk.FLAT,
+      background='#f8fafc',
+      foreground='#0f172a',
+  )
+  binary_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+  binary_text.tag_configure('right', justify='right')
+  binary_text.insert(tk.END, '\n'.join(format(value, 'b') for value in binary_values), 'right')
+  #binary_text.insert(tk.END, '\n'.join(str(value) for value in binary_values), 'right') #for list of numbers instead of binarys
+  binary_text.configure(state=tk.DISABLED)
+  binary_scroll.config(command=binary_text.yview)
+
+  # Native Tkinter scrollbar wired directly to the plot's X-axis data window
+  h_scroll = ttk.Scrollbar(root, orient=tk.HORIZONTAL)
+  h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+
+  toolbar_frame = ttk.Frame(root)
+  toolbar_frame.pack(side=tk.BOTTOM, fill=tk.X)
+  FullGraphToolbar(mpl_canvas, toolbar_frame, (min_x, max_x))
+
+  def sync_scrollbar_thumb(*_):
+    """Updates the scrollbar handle size and position to match ax.get_xlim()."""
+    cur_left, cur_right = ax.get_xlim()
+    start_frac = max(0.0, (cur_left - min_x) / total_span)
+    end_frac = min(1.0, (cur_right - min_x) / total_span)
+    h_scroll.set(start_frac, end_frac)
+
+  def on_scrollbar_move(*args):
+    """Moves ax.set_xlim() when the user drags or clicks the scrollbar."""
+    cur_left, cur_right = ax.get_xlim()
+    cur_width = cur_right - cur_left
+
+    if args[0] == 'moveto':
+      frac = float(args[1])
+      new_left = min_x + frac * total_span
+    elif args[0] == 'scroll':
+      step = int(args[1]) * (cur_width * 0.15)
+      new_left = cur_left + step
+    else:
+      return
+
+    # Clamp within data bounds
+    new_left = max(min_x, min(max_x - cur_width, new_left))
+    ax.set_xlim(new_left, new_left + cur_width)
+    sync_scrollbar_thumb()
+    fig.canvas.draw_idle()
+
+  def on_mouse_wheel(event):
+    """Zooms horizontally around cursor, or pans left/right if Shift is held."""
+    if event.inaxes != ax or event.xdata is None:
+      return
+
+    cur_left, cur_right = ax.get_xlim()
+    cur_width = cur_right - cur_left
+
+    # Shift + Scroll pans the data horizontally
+    
+    if event.key and 'shift' in event.key:
+      # Normal Scroll zooms in/out centered on the cursor's X position
+      zoom_factor = 0.8 if event.button == 'up' else 1.25
+      new_width = max(3.0, min(total_span, cur_width * zoom_factor))
+
+      rel_pos = (event.xdata - cur_left) / cur_width
+      new_left = max(min_x, event.xdata - new_width * rel_pos)
+      new_right = min(max_x, new_left + new_width)
+      if new_right == max_x:
+        new_left = max(min_x, max_x - new_width)
+
+      ax.set_xlim(new_left, new_right)
+      ax.set_ylim(bottom=1)
+    else:
+      direction = -1 if event.button == 'up' else 1
+      new_left = cur_left + direction * (cur_width * 0.15)
+      new_left = max(min_x, min(max_x - cur_width, new_left))
+      ax.set_xlim(new_left, new_left + cur_width)
+
+    sync_scrollbar_thumb()
+    fig.canvas.draw_idle()
+
+  h_scroll.config(command=on_scrollbar_move)
+  fig.canvas.mpl_connect('scroll_event', on_mouse_wheel)
+  # Also keep scrollbar synced if user clicks the toolbar's Home/Back/Forward buttons
+  ax.callbacks.connect('xlim_changed', sync_scrollbar_thumb)
+
+  sync_scrollbar_thumb()
+  mpl_canvas.draw()
+  root.mainloop()
+
+
+def plot_collatz(start_n, colorsFunc = None, textFunc=None, display=True):
+  """Builds the Collatz figure and opens the interactive viewer."""
+  points, segments, colors, widths = build_trajectory(start_n,colorsFunc)
+  xs, ys = zip(*points)
+  print(f'max number is {max(ys)}')
+
+  #for yValue in ys:
+  #    print(format(yValue,'b'))
+  total_steps = len(points) - 1
+
+  # Fixed responsive figure size so axes stay pinned while data scrolls inside
+  fig, ax = plt.subplots(figsize=(11.5, 5.2), dpi=100)
+
+  ax.add_collection(LineCollection(segments, colors=colors, linewidths=widths))
+  scatter = ax.scatter(xs, ys, color='#1e293b', s=28, zorder=4)
+
+  ax.set_yscale('log')
+  # Start zoomed into the first 30 steps so the scrollbar is immediately active
+  initial_right = min(total_steps + 0.8, 30.0)
+  ax.set_xlim(-0.8, initial_right)
+  ax.set_ylim(1, max(ys) * 1.8)
+
+  ax.set_title(
+      f'Collatz Path of {start_n:,} ({total_steps} Steps, Peak: {max(ys):,})  —  '
+      'Scroll: Zoom | Shift+Scroll / Bar: Pan',
+      loc='left',
+      pad=12,
+  )
+
+  ax.set_xlabel('Step Index')
+  ax.set_ylabel('Value (Log Scale)')
+  ax.grid(True, which='both', linestyle='--', alpha=0.4)
+
+  fig.tight_layout()
+
+  if display:
+    attach_hover_tooltip(fig, ax, scatter, points,textFunc)
+    show_interactive_window(
+      fig,
+      ax,
+      total_steps,
+      ys,
+      title=f'Collatz Path of {start_n:,}',
+    )
+  else:
+    ax.set_xlim((-0.8,total_steps + 0.8))
+    return fig,ax
+
+  
+
+allColors = ('green','blue')
+def getlineColor(p1,p2):
+  c = countTrailingZeros(3 * p1[1] + 1)
+  return 'purple' if c > len(allColors) else allColors[(c-1) % len(allColors)]
+
+getText = lambda x,y: {'bin':format(y,'b')}
+
+def getColoredLinesGraph(n, toDisplay=True):
+    return plot_collatz(n,textFunc=getText, colorsFunc=getlineColor,display=toDisplay)
+  
+if __name__ == '__main__':
+    print(getlineColor((3,21),0))    
+    starting_number = get_starting_number()
+    getColoredLinesGraph(starting_number)
+    
+    #collatzBinDerivative2(starting_number)
+    
